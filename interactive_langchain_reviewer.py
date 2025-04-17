@@ -1,27 +1,35 @@
-# langchain_pr_reviewer.py (parallel + caching, no streaming)
 import os
 import re
 import subprocess
-import concurrent.futures
-from time import sleep
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain.memory import ConversationBufferMemory
-from langchain.prompts import ChatPromptTemplate
-from context_extractor import extract_related_context
-from param_type_analyzer import extract_function_definitions, extract_function_calls, resolve_param_types, find_odd_types
-from infer_type_ai import infer_type_ai
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-load_dotenv()
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import LLMChain
+from langchain_openai import ChatOpenAI
+
+from context_extractor import extract_related_context
+from validator_agent import suggest_validators
+from validators import (
+    input_validation,
+    tenant_validation,
+    security_validation,
+    logic_validation,
+    db_validation,
+)
+from infer_type_ai import infer_type
+from review_prompt import review_prompt
 
 user_input_response = None
 
-def set_user_input(text):
+def set_user_input(answer: str):
     global user_input_response
-    user_input_response = text
+    user_input_response = answer
 
-def get_changed_functions_with_bodies(base_branch, pr_branch, repo_path):
+
+def get_changed_functions(repo_path, base_branch, pr_branch):
     subprocess.run(["git", "checkout", pr_branch], cwd=repo_path)
+
     diff_output = subprocess.run(
         ["git", "diff", f"{base_branch}...{pr_branch}", "--unified=0", "--", "*.php"],
         cwd=repo_path,
@@ -40,8 +48,7 @@ def get_changed_functions_with_bodies(base_branch, pr_branch, repo_path):
         elif line.startswith("@@") and current_file:
             match = re.search(r'\+(\d+)', line)
             if match:
-                line_no = int(match.group(1))
-                file_changes[current_file].add(line_no)
+                file_changes[current_file].add(int(match.group(1)))
 
     def extract_function_body(filepath, line_numbers):
         try:
@@ -51,11 +58,8 @@ def get_changed_functions_with_bodies(base_branch, pr_branch, repo_path):
             funcs = []
             for idx in line_numbers:
                 i = idx - 1
-                while i >= 0:
-                    if re.search(r'function\s+(\w+)\s*\(', lines[i]):
-                        break
+                while i >= 0 and not re.search(r'function\s+\w+\s*\(', lines[i]):
                     i -= 1
-
                 if i < 0:
                     continue
 
@@ -77,7 +81,8 @@ def get_changed_functions_with_bodies(base_branch, pr_branch, repo_path):
                 funcs.append({
                     "name": func_name,
                     "file": filepath,
-                    "body": ''.join(body_lines).strip()
+                    "body": ''.join(body_lines).strip(),
+                    "full_file_code": ''.join(lines)
                 })
             return funcs
         except Exception:
@@ -95,127 +100,112 @@ def get_changed_functions_with_bodies(base_branch, pr_branch, repo_path):
 
     return all_funcs
 
-def get_llm_chain():
-    llm = ChatOpenAI(temperature=0.3, model_name="gpt-4")
-    prompt = ChatPromptTemplate.from_template("""
-You are an AI PR reviewer for a PHP codebase using the Yii framework and EMongoDB.
 
-Function Name: {func_name}
-File: {file_path}
-
-Function Body:
-{func_body}
-
-Related Context:
-{extra_context}
-
-Odd Parameter Types:
-{odd_param_types}
-
-AI-Inferred Types:
-{ai_types}
-
-Chat History:
-{chat_history}
-
-Tasks:
-1. Is this function validating input properly?
-2. Are EMongoDB queries safe and performant?
-3. Are there any logic or security issues?
-4. If unsure, ask a clear follow-up question starting with 'QUESTION:'.
-5. If confident, summarize only issues.
-
-Return your output using the following markdown format. You must include **every** section, even if the value is 'None'. Each section must start with a bullet like `- **Section Name**:` followed by a summary or `None`:
-- **Input Validation**: <summary or 'None'>
-- **Tenant Safety**: <summary or 'None'>
-- **Database Safety**: <summary or 'None'>
-- **Logic Issues**: <summary or 'None'>
-- **Security Concerns**: <summary or 'None'>
-
-Example output:
-- **Input Validation**: Function does not validate `$params['email']`.
-- **Tenant Safety**: `tenant()` is called with `$application->tenant_id`, but no check for null.
-- **Database Safety**: No checks for `save()` result.
-- **Logic Issues**: None
-- **Security Concerns**: None
-- **Input Validation**: <summary or 'None'>
-- **Tenant Safety**: Confirm if tenant ID is passed to tenant() calls. Trace its value and warn if null or missing.
-- **Database Safety**: <summary or 'None'>
-- **Logic Issues**: <summary or 'None'>
-- **Security Concerns**: <summary or 'None'>
-""")
-    chain = prompt | llm
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    return chain, memory
-
-def review_single_function(func, callback):
-    global user_input_response
+def review_single_function(func, full_code, callback):
+    func_key = f"{func['file'].strip()}::{func['name'].strip()}"
     callback(f"🔍 Reviewing: {func['name']} in {func['file']}")
-    callback("📦 Analyzing function body...")
 
-    chain, memory = get_llm_chain()
-
+    # Suggest validators
     try:
-        with open(func['file'], 'r', encoding='utf-8') as f:
-            full_code = f.read()
-    except Exception:
-        full_code = ""
+        suggested = suggest_validators(func['body'], full_code)
+    except Exception as e:
+        callback(f"❌ Validator agent failed: {e}")
+        suggested = []
 
-    extra = extract_related_context(func_body=func['body'], full_code=full_code)
-    extra_context_str = "\n".join(f"{key} =>\n{value}" for key, value in extra.items() if value)
-
-    funcs_all = extract_function_definitions(full_code)
-    calls_all = extract_function_calls(full_code)
-    all_param_types = resolve_param_types(funcs_all, calls_all)
-    odd_params = find_odd_types(all_param_types)
-    odd_param_report = "\n".join(f"{k}: {v}" for k, v in odd_params.items())
-
-    expressions_to_check = re.findall(r'(\$\w+(\[[^\]]+\])?(->\w+)?)', func['body'])
-    ai_type_results = []
-    for match in expressions_to_check:
-        expr = match[0].strip()
-        if expr:
-            callback(f"🧠 Inferring type for {expr}...")
-            ai_type = infer_type_ai(expr, context_code=full_code, current_class_name=func['name'])
-            ai_type_results.append(f"{expr} => {ai_type}")
-    ai_type_summary = "\n".join(ai_type_results)
-
-    inputs = {
-        "func_name": func['name'],
-        "file_path": func['file'],
-        "func_body": func['body'],
-        "extra_context": extra_context_str,
-        "odd_param_types": odd_param_report,
-        "ai_types": ai_type_summary,
-        "chat_history": memory.load_memory_variables({})["chat_history"]
-    }
-
-    output = chain.invoke(inputs)
-    print(output.content)
-
-    if output.content.strip().lower().startswith("question:"):
-        question = output.content.strip().split("QUESTION:", 1)[-1].strip()
-        callback("USER_INPUT_REQUEST::" + question)
-        user_input_response = None
-        while user_input_response is None:
-            sleep(0.5)
-        memory.chat_memory.add_user_message(user_input_response)
-        memory.chat_memory.add_ai_message(question)
-        output = chain.invoke(inputs)
-    if output.content.strip():
-        callback(f"❗ AI Feedback: {output.content.strip()}")
-    else:
-        callback("✅ No issues detected.")
-
-    callback("----------------------------------------")
-
-def run_review_with_callback(repo_path, base_branch, pr_branch, callback):
-    funcs = get_changed_functions_with_bodies(base_branch, pr_branch, repo_path)
-
-    if not funcs:
-        callback("❌ No changed functions found.")
+    if not suggested:
+        callback(f"ℹ️ No validators suggested.")
         return
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(review_single_function, func, callback) for func in funcs]
-        concurrent.futures.wait(futures)
+    callback(f"STREAM::{func_key}::Selected validators: {', '.join(suggested)}")
+
+    # Context and type info
+    context_code = extract_related_context(func['body'], func['full_file_code'])
+    type_info = infer_type(func['body'], context_code, func['full_file_code'])
+    type_summary = "\n".join(
+        f"- {var}: {', '.join(f'{t} ({c})' for t, c in types.items())}"
+        for var, types in type_info.items()
+    )
+
+    # Run validators in parallel
+    validator_map = {
+        "input_validation": input_validation.validate,
+        "tenant_validation": tenant_validation.validate,
+        "security_validation": security_validation.validate,
+        "logic_validation": logic_validation.validate,
+        "db_validation": db_validation.validate,
+    }
+
+    results = []
+    with ThreadPoolExecutor() as executor:
+        futures = {
+            executor.submit(validator_map[name], func['body'], context_code, func['full_file_code']): name
+            for name in suggested if name in validator_map
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                result = future.result(timeout=20)
+                if result and result.strip().lower() != "none":
+                    results.append(result)
+            except Exception as e:
+                results.append(f"- **{name}**: ❌ Error: {str(e)}")
+
+    combined = "\n".join(results) + "\n\nInferred Types:\n" + type_summary
+
+    # AI Review Chain
+    memory = ConversationBufferMemory(memory_key="chat_history", input_key="func_body")
+    llm = ChatOpenAI(model_name="gpt-4", temperature=0)
+    chain = LLMChain(prompt=review_prompt, llm=llm, memory=memory)
+
+    output = chain.invoke({
+        "func_body": func['body'],
+        "combined": combined,
+        "chat_history": ""
+    })
+
+    response_text = output.get("text") or output.get("output") or ""
+    question_line = next((line for line in response_text.splitlines() if line.lower().startswith("question:")), None)
+
+    if not question_line:
+        safe_response = response_text.strip().replace("\n", "\\n")
+        callback(f"STREAM::{func_key}::{safe_response}")
+        return  # ✅ Done here if no clarification needed
+
+    # Ask user for clarification
+    callback(f"USER_INPUT_REQUEST::{func_key}::{question_line.split(':', 1)[-1].strip()}")
+    global user_input_response
+    user_input_response = None
+    while user_input_response is None:
+        time.sleep(0.5)
+
+    memory.chat_memory.add_user_message(user_input_response)
+    memory.chat_memory.add_ai_message(question_line)
+
+    # Re-run with clarification
+    final_output = chain.invoke({
+        "func_body": func['body'],
+        "combined": combined,
+        "chat_history": memory.buffer
+    })
+
+    final_response = final_output.get("text") or final_output.get("output") or ""
+    safe_final = final_response.strip().replace("\n", "\\n")
+    callback(f"STREAM::{func_key}::{safe_final}")
+
+def run_review_with_callback(repo_path, base_branch, pr_branch, callback):
+    callback(f"📦 Repo: {repo_path}")
+    changed = get_changed_functions(repo_path, base_branch, pr_branch)
+
+    if not changed:
+        callback("✅ No changed functions found.")
+        return
+
+    callback(f"🔎 {len(changed)} changed function(s) found.")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(review_single_function, func, func['full_file_code'], callback)
+            for func in changed
+        ]
+        for future in as_completed(futures):
+            future.result()

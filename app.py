@@ -1,46 +1,55 @@
-# app.py (Flask backend for AI PR Reviewer + Chat UI)
-import os
+from flask import Flask, request, jsonify, Response, render_template
+from flask_cors import CORS
 import threading
-from flask import Flask, render_template, request, Response, send_from_directory, jsonify
-from dotenv import load_dotenv
-from queue import Queue
-from time import sleep
+import queue
+import time
 
 from interactive_langchain_reviewer import run_review_with_callback, set_user_input
 
-load_dotenv()
-
 app = Flask(__name__)
-log_queue = Queue()
+CORS(app)
+
+# Queue to stream logs to frontend via /stream
+log_queue = queue.Queue()
+
 
 @app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
+
+
+@app.route("/start", methods=["POST"])
+def start():
+    repo = request.form.get("repo")
+    base = request.form.get("base")
+    pr = request.form.get("pr")
+
+    def run():
+        run_review_with_callback(repo, base, pr, lambda msg: log_queue.put(msg))
+
+    threading.Thread(target=run).start()
+    return jsonify({"status": "started"})
+
+
+@app.route("/chat_reply", methods=["POST"])
+def chat_reply():
+    reply = request.form.get("reply", "").strip()
+    set_user_input(reply)
+    return jsonify({"status": "received"})
+
 
 @app.route("/stream")
 def stream():
     def event_stream():
         while True:
-            msg = log_queue.get()
-            yield f"data: {msg}\n\n"
-    return Response(event_stream(), mimetype="text/event-stream")
+            try:
+                message = log_queue.get(timeout=60)
+                yield f"data: {message}\n\n"
+            except queue.Empty:
+                yield f"data: \n\n"
 
-@app.route("/start", methods=["POST"])
-def start():
-    repo = request.form["repo"]
-    base = request.form["base"]
-    pr = request.form["pr"]
+    return Response(event_stream(), content_type="text/event-stream")
 
-    threading.Thread(target=lambda: run_review_with_callback(repo, base, pr, log_queue.put)).start()
-    return {"status": "started"}
-
-@app.route("/chat_reply", methods=["POST"])
-def chat_reply():
-    data = request.get_json()
-    if "message" in data:
-        set_user_input(data["message"])
-        return jsonify({"status": "received"})
-    return jsonify({"error": "No message sent"}), 400
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000, threaded=True)

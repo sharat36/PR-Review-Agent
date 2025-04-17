@@ -2,70 +2,242 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AI PR Reviewer Chat</title>
+  <title>AI PR Reviewer</title>
   <style>
-    body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 1rem; }
-    input, button { padding: 0.5rem; margin: 0.5rem; font-size: 1rem; }
-    #chat { background: #222; padding: 1rem; height: 70vh; overflow-y: scroll; border: 1px solid #555; margin-bottom: 1rem; }
-    .user-msg { color: #87cefa; }
-    .ai-msg { color: #00ff88; }
-    .meta-msg { color: #888; font-style: italic; }
-    #chat-form { display: flex; }
-    #chat-form input { flex: 1; }
+    body {
+      font-family: "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      margin: 0;
+      padding: 20px;
+      color: #333;
+    }
+
+    h1 {
+      margin-bottom: 15px;
+      font-size: 24px;
+      color: #222;
+    }
+
+    form {
+      background: #fff;
+      padding: 15px 20px;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.05);
+      display: flex;
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+
+    input[type="text"] {
+      padding: 8px 10px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      flex: 1;
+      min-width: 180px;
+    }
+
+    button {
+      padding: 8px 16px;
+      background-color: #00c292;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background-color: #00a87d;
+    }
+
+    #streamContainer {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .func-card {
+      background: #fff;
+      border-radius: 6px;
+      border: 1px solid #ddd;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+      overflow: hidden;
+      transition: all 0.3s ease;
+    }
+
+    .func-header {
+      background: #f8f9fa;
+      font-weight: bold;
+      padding: 10px 15px;
+      border-bottom: 1px solid #ddd;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .func-body {
+      padding: 12px 15px;
+      font-family: monospace;
+      white-space: pre-wrap;
+      display: block;
+    }
+
+    .func-body.collapsed {
+      display: none;
+    }
+
+    .reply-box {
+      display: flex;
+      gap: 10px;
+      padding: 10px 15px;
+      background: #f0f3f8;
+      border-top: 1px solid #ccc;
+    }
+
+    .reply-box input {
+      flex: 1;
+      padding: 8px;
+      border-radius: 4px;
+      border: 1px solid #aaa;
+    }
+
+    .reply-box button {
+      background-color: #007bff;
+      color: white;
+      border: none;
+      padding: 8px 14px;
+      border-radius: 4px;
+    }
+
+    .toggle-button {
+      background: none;
+      border: none;
+      font-size: 16px;
+      color: #00a87d;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
-  <h2>🤖 AI PR Reviewer</h2>
+  <h1>🔍 AI PR Reviewer</h1>
+
   <form id="startForm">
-    <label>📁 Repo Path: <input type="text" name="repo" value="/data" /></label><br>
-    <label>🌿 Base Branch: <input type="text" name="base" /></label><br>
-    <label>🌿 PR Branch: <input type="text" name="pr" /></label><br>
+    <input type="text" name="repo" placeholder="/full/path/to/repo" required>
+    <input type="text" name="base" placeholder="base branch (e.g. main)" required>
+    <input type="text" name="pr" placeholder="PR branch (e.g. feature/fix)" required>
     <button type="submit">Start Review</button>
   </form>
 
-  <div id="chat"></div>
-  <form id="chat-form" style="display:none">
-    <input type="text" id="user-input" placeholder="Type your reply..." autocomplete="off" />
-    <button type="submit">Send</button>
-  </form>
+  <div id="streamContainer"></div>
 
   <script>
-    const chat = document.getElementById("chat");
-    const chatForm = document.getElementById("chat-form");
-    const userInput = document.getElementById("user-input");
+    const streamContainer = document.getElementById("streamContainer");
+    const functionCards = {};
 
-    document.getElementById("startForm").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const data = new FormData(e.target);
-      await fetch("/start", { method: "POST", body: data });
-      chat.innerHTML = "<div class='meta-msg'>⏳ Starting review...</div>";
-      chatForm.style.display = "flex";
+    const evtSource = new EventSource("/stream");
 
-      const stream = new EventSource("/stream");
-      stream.onmessage = (event) => {
-        const msg = event.data;
-        if (msg.startsWith("USER_INPUT_REQUEST::")) {
-          const question = msg.replace("USER_INPUT_REQUEST::", "");
-          chat.innerHTML += `<div class='ai-msg'>🤖 ${question}</div>`;
-        } else {
-          chat.innerHTML += `<div class='meta-msg'>${msg}</div>`;
-        }
-        chat.scrollTop = chat.scrollHeight;
+    evtSource.onmessage = function(event) {
+      const message = event.data;
+
+      // Start new card
+      if (message.includes("🔍 Reviewing:")) {
+        const match = message.match(/🔍 Reviewing: (.*?) in (.*)/);
+        if (!match) return;
+        const funcName = match[1].trim();
+        const filePath = match[2].trim();
+        const funcKey = `${filePath}::${funcName}`;
+
+        const card = document.createElement("div");
+        card.classList.add("func-card");
+
+        const header = document.createElement("div");
+        header.classList.add("func-header");
+
+        const title = document.createElement("div");
+        title.textContent = message;
+
+        const toggle = document.createElement("button");
+        toggle.innerHTML = "➖";
+        toggle.className = "toggle-button";
+
+        const body = document.createElement("div");
+        body.classList.add("func-body");
+
+        toggle.onclick = () => {
+          body.classList.toggle("collapsed");
+          toggle.innerHTML = body.classList.contains("collapsed") ? "➕" : "➖";
+        };
+
+        header.appendChild(title);
+        header.appendChild(toggle);
+        card.appendChild(header);
+        card.appendChild(body);
+        streamContainer.appendChild(card);
+
+        functionCards[funcKey] = { card, body };
+        console.log("✅ Card created for:", funcKey);
+        return;
       }
-    });
 
-    chatForm.addEventListener("submit", async (e) => {
+      // STREAM::<file>::<function>::<message>
+      if (message.startsWith("STREAM::") || message.startsWith("USER_INPUT_REQUEST::")) {
+        const parts = message.split("::");
+        const type = parts[0];
+        const funcKey = parts[1] + "::" + parts[2];
+        const content = parts.slice(3).join("::").replace(/\\n/g, "<br/>");
+
+        console.log(`📥 ${type} for ${funcKey}`);
+
+        const card = functionCards[funcKey];
+        if (!card) {
+          console.warn("❌ No matching card for:", funcKey);
+          return;
+        }
+
+        if (type === "STREAM") {
+          const div = document.createElement("div");
+          div.innerHTML = content;
+          card.body.appendChild(div);
+        } else if (type === "USER_INPUT_REQUEST") {
+          const replyBox = document.createElement("div");
+          replyBox.classList.add("reply-box");
+          replyBox.innerHTML = `
+            <input type="text" class="replyInput" placeholder="${content}" />
+            <button class="replySendBtn">Send</button>
+          `;
+
+          const replyInput = replyBox.querySelector("input");
+          const replyBtn = replyBox.querySelector("button");
+
+          replyBtn.onclick = function () {
+            const reply = replyInput.value;
+            if (!reply) return;
+
+            fetch("/chat_reply", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: "reply=" + encodeURIComponent(reply)
+            }).then(() => {
+              const response = document.createElement("div");
+              response.innerHTML = `<b>🙋 You:</b> ${reply}`;
+              card.body.appendChild(response);
+              replyBox.remove();
+            });
+          };
+
+          card.card.appendChild(replyBox);
+          replyInput.focus();
+        }
+      }
+    };
+
+    // Clear on Start Review
+    document.getElementById("startForm").addEventListener("submit", function (e) {
       e.preventDefault();
-      const input = userInput.value.trim();
-      if (!input) return;
-      chat.innerHTML += `<div class='user-msg'>🧑 ${input}</div>`;
-      chat.scrollTop = chat.scrollHeight;
-      await fetch("/chat_reply", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: input })
-      });
-      userInput.value = "";
+      const formData = new FormData(this);
+      streamContainer.innerHTML = "";
+      fetch("/start", { method: "POST", body: formData });
     });
   </script>
 </body>

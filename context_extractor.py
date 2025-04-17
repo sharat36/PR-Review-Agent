@@ -1,76 +1,78 @@
-# context_extractor.py
 import re
+import os
+
+def extract_related_context(func_body: str, full_code: str) -> str:
+    context = ""
+
+    # Extract model class from usage like static::model()
+    model_match = re.search(r'(\w+)::model\(\)', func_body)
+    model_class = model_match.group(1) if model_match else None
+
+    # If a model is detected, extract its class code
+    if model_class:
+        context += get_class_code(model_class, full_code)
+
+        # If model extends a parent class, include parent's methods like tenant()
+        parent_class = get_parent_class(model_class, full_code)
+        if parent_class:
+            context += get_method_code(parent_class, "tenant", full_code)
+            context += get_method_code(parent_class, "save", full_code)
+
+        # Also extract tenant() and save() if overridden in model itself
+        context += get_method_code(model_class, "tenant", full_code)
+        context += get_method_code(model_class, "save", full_code)
+
+    return context
 
 
-def extract_related_context(func_body, full_code):
-    related_context = {
-        "methods": {},
-        "classes": {},
-        "variables": {}
-    }
-
-    # 1. Extract all functions in file
-    function_pattern = re.compile(r'(public|private|protected)?\s*function\s+(\w+)\s*\([^)]*\)\s*\{', re.MULTILINE)
-    for match in function_pattern.finditer(full_code):
-        start = match.start()
-        name = match.group(2)
-        body = extract_block(full_code, start)
-        related_context['methods'][name] = body
-
-    # 2. Extract all class definitions
-    class_pattern = re.compile(r'class\s+(\w+)\s*(extends\s+\w+)?\s*\{', re.MULTILINE)
-    for match in class_pattern.finditer(full_code):
-        start = match.start()
-        name = match.group(1)
-        body = extract_block(full_code, start)
-        related_context['classes'][name] = body
-
-    # 3. Extract variable initializations
-    var_pattern = re.compile(r'\$(\w+)\s*=\s*[^;]+;', re.MULTILINE)
-    for match in var_pattern.finditer(full_code):
-        name = match.group(1)
-        related_context['variables'][name] = match.group(0)
-
-    # 4. Scan func_body for usage
-    needed_context = {
-        "setDetails_body": None,
-        "save_model_class": None,
-        "params_initialization": None
-    }
-
-    # Detect method calls like $this->setDetails or setDetails(...)
-    if match := re.search(r'(\$this->)?setDetails\s*\(', func_body):
-        if 'setDetails' in related_context['methods']:
-            needed_context['setDetails_body'] = related_context['methods']['setDetails']
-
-    # Detect save() call like $log->save() and guess class by var name
-    if match := re.search(r'\$(\w+)->save\(', func_body):
-        var_name = match.group(1)
-        class_match = re.search(rf'\${var_name}\s*=\s*new\s+(\w+)', full_code)
-        if class_match:
-            class_name = class_match.group(1)
-            if class_name in related_context['classes']:
-                needed_context['save_model_class'] = related_context['classes'][class_name]
-
-    # Detect usage of $params['something']
-    if 'params' in related_context['variables']:
-        needed_context['params_initialization'] = related_context['variables']['params']
-
-    return needed_context
+def get_class_code(class_name: str, code: str) -> str:
+    """
+    Extract full class definition (excluding method bodies) for summary context.
+    """
+    pattern = rf'class\s+{re.escape(class_name)}\b.*?\{{.*?^\}}'
+    match = re.search(pattern, code, re.DOTALL | re.MULTILINE)
+    if match:
+        return f"\n// Class: {class_name}\n" + match.group(0) + "\n"
+    return ""
 
 
-def extract_block(code, start_index):
+def get_method_code(class_name: str, method_name: str, code: str) -> str:
+    """
+    Extract a method from the class body (roughly) using brace matching.
+    """
+    pattern = rf'class\s+{re.escape(class_name)}.*?\{{(.*?)^\}}'
+    class_match = re.search(pattern, code, re.DOTALL | re.MULTILINE)
+    if not class_match:
+        return ""
+
+    class_body = class_match.group(1)
+    method_pattern = rf'function\s+{re.escape(method_name)}\s*\(.*?\)\s*\{{'
+    start = re.search(method_pattern, class_body)
+    if not start:
+        return ""
+
+    idx = start.start()
     brace_count = 0
-    inside = False
-    block = []
-    for i in range(start_index, len(code)):
-        c = code[i]
-        block.append(c)
-        if c == '{':
-            brace_count += 1
-            inside = True
-        elif c == '}':
-            brace_count -= 1
-        if inside and brace_count == 0:
+    method_lines = []
+    in_method = False
+
+    for line in class_body[idx:].splitlines():
+        if '{' in line:
+            brace_count += line.count('{')
+            in_method = True
+        if '}' in line:
+            brace_count -= line.count('}')
+        method_lines.append(line)
+        if in_method and brace_count == 0:
             break
-    return ''.join(block).strip()
+
+    return f"\n// {class_name}::{method_name}()\n" + "\n".join(method_lines) + "\n"
+
+
+def get_parent_class(class_name: str, code: str) -> str:
+    """
+    Get parent class from definition like: class Foo extends Bar
+    """
+    pattern = rf'class\s+{re.escape(class_name)}\s+extends\s+(\w+)'
+    match = re.search(pattern, code)
+    return match.group(1) if match else None
