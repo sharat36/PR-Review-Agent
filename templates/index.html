@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AI PR Reviewer Chat</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 1rem; }
+    input, button { padding: 0.5rem; margin: 0.5rem; font-size: 1rem; }
+    #chat { background: #222; padding: 1rem; height: 70vh; overflow-y: scroll; border: 1px solid #555; margin-bottom: 1rem; }
+    .user-msg { color: #87cefa; }
+    .ai-msg { color: #00ff88; }
+    .meta-msg { color: #888; font-style: italic; }
+    #chat-form { display: flex; }
+    #chat-form input { flex: 1; }
+  </style>
+</head>
+<body>
+  <h2>🤖 AI PR Reviewer</h2>
+  <form id="startForm">
+    <label>📁 Repo Path: <input type="text" name="repo" value="/data" /></label><br>
+    <label>🌿 Base Branch: <input type="text" name="base" /></label><br>
+    <label>🌿 PR Branch: <input type="text" name="pr" /></label><br>
+    <button type="submit">Start Review</button>
+  </form>
+
+  <div id="chat"></div>
+  <form id="chat-form" style="display:none">
+    <input type="text" id="user-input" placeholder="Type your reply..." autocomplete="off" />
+    <button type="submit">Send</button>
+  </form>
+
+  <script>
+    const chat = document.getElementById("chat");
+    const chatForm = document.getElementById("chat-form");
+    const userInput = document.getElementById("user-input");
+
+    document.getElementById("startForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = new FormData(e.target);
+      await fetch("/start", { method: "POST", body: data });
+      chat.innerHTML = "<div class='meta-msg'>⏳ Starting review...</div>";
+      chatForm.style.display = "flex";
+
+      const stream = new EventSource("/stream");
+      stream.onmessage = (event) => {
+        const msg = event.data;
+        if (msg.startsWith("USER_INPUT_REQUEST::")) {
+          const question = msg.replace("USER_INPUT_REQUEST::", "");
+          chat.innerHTML += `<div class='ai-msg'>🤖 ${question}</div>`;
+        } else {
+          chat.innerHTML += `<div class='meta-msg'>${msg}</div>`;
+        }
+        chat.scrollTop = chat.scrollHeight;
+      }
+    });
+
+    chatForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = userInput.value.trim();
+      if (!input) return;
+      chat.innerHTML += `<div class='user-msg'>🧑 ${input}</div>`;
+      chat.scrollTop = chat.scrollHeight;
+      await fetch("/chat_reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: input })
+      });
+      userInput.value = "";
+    });
+  </script>
+</body>
+</html>

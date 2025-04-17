@@ -1,10 +1,10 @@
 # langchain_pr_reviewer.py
 import os
 import re
+import subprocess
 from dotenv import load_dotenv
 load_dotenv()
 
-import subprocess
 from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate
@@ -13,6 +13,12 @@ from context_extractor import extract_related_context
 from param_type_analyzer import extract_function_definitions, extract_function_calls, resolve_param_types, find_odd_types
 from infer_type_ai import infer_type_ai
 
+
+user_input_response = None
+
+def set_user_input(text):
+    global user_input_response
+    user_input_response = text
 
 def get_changed_functions_with_bodies(base_branch, pr_branch, repo_path):
     subprocess.run(["git", "checkout", pr_branch], cwd=repo_path)
@@ -116,26 +122,25 @@ Tasks:
 1. Is this function validating input properly?
 2. Are EMongoDB queries safe and performant?
 3. Are there any logic or security issues?
-4. Only respond if there is an issue or risk detected. If everything looks good, return nothing.
+4. If unsure, ask a clear follow-up question starting with 'QUESTION:'.
+5. If confident, summarize only issues.
 """)
     chain = prompt | llm
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     return chain, memory
 
-def run_interactive_review():
-    repo_path = '/data/live/'#input("📁 Repo path: ")
-    base_branch = 'release/8.4'#input("🌿 Base branch: ")
-    pr_branch = 'feature/8.4-pr-test'#input("🌿 PR branch: ")
+def run_review_with_callback(repo_path, base_branch, pr_branch, callback):
+    global user_input_response
 
     funcs = get_changed_functions_with_bodies(base_branch, pr_branch, repo_path)
 
     if not funcs:
-        print("❌ No changed functions found.")
+        callback("❌ No changed functions found.")
         return
 
     for func in funcs:
-        print(f"\n🔍 Reviewing: {func['name']}\n📄 File: {func['file']}")
-        print("📦 Function body preview:\n" + func["body"][:500] + "...\n")
+        callback(f"🔍 Reviewing: {func['name']} in {func['file']}")
+        callback("📦 Analyzing function body...")
 
         chain, memory = get_llm_chain()
 
@@ -153,37 +158,42 @@ def run_interactive_review():
         all_param_types = resolve_param_types(funcs_all, calls_all)
         odd_params = find_odd_types(all_param_types)
         odd_param_report = "\n".join(f"{k}: {v}" for k, v in odd_params.items())
-        print(odd_param_report)
 
         expressions_to_check = re.findall(r'(\$\w+(\[[^\]]+\])?(->\w+)?)', func['body'])
         ai_type_results = []
         for match in expressions_to_check:
             expr = match[0].strip()
             if expr:
-                ai_type = infer_type_ai(expr, context_code=full_code)
+                ai_type = infer_type_ai(expr, context_code=full_code, current_class_name=func['name'])
+                callback(f"🧠 Inferring type for {expr}...{ai_type}")
                 ai_type_results.append(f"{expr} => {ai_type}")
         ai_type_summary = "\n".join(ai_type_results)
 
-        while True:
-            inputs = {
-                "func_name": func['name'],
-                "file_path": func['file'],
-                "func_body": func['body'],
-                "extra_context": extra_context_str,
-                "odd_param_types": odd_param_report,
-                "ai_types": ai_type_summary,
-                "chat_history": memory.load_memory_variables({})["chat_history"]
-            }
+        inputs = {
+            "func_name": func['name'],
+            "file_path": func['file'],
+            "func_body": func['body'],
+            "extra_context": extra_context_str,
+            "odd_param_types": odd_param_report,
+            "ai_types": ai_type_summary,
+            "chat_history": memory.load_memory_variables({})["chat_history"]
+        }
+
+        output = chain.invoke(inputs)
+
+        if output.content.strip().lower().startswith("question:"):
+            question = output.content.strip().split("QUESTION:", 1)[-1].strip()
+            callback("USER_INPUT_REQUEST::" + question)
+            user_input_response = None
+            while user_input_response is None:
+                sleep(0.5)
+            memory.chat_memory.add_user_message(user_input_response)
+            memory.chat_memory.add_ai_message(question)
             output = chain.invoke(inputs)
-            print(f"\n🤖 AI: {output.content}\n")
 
-            if any(k in output.content.lower() for k in ["final suggestion", "recommendation", "review summary"]):
-                break
+        if output.content.strip():
+            callback(f"❗ AI Feedback: {output.content.strip()}")
+        else:
+            callback("✅ No issues detected.")
 
-            user_input = input("🧑 You (optional reply): ")
-            if not user_input.strip():
-                break
-            memory.chat_memory.add_user_message(user_input)
-
-if __name__ == "__main__":
-    run_interactive_review()
+        callback("----------------------------------------")
