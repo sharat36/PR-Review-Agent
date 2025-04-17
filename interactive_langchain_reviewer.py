@@ -1,18 +1,18 @@
-# langchain_pr_reviewer.py
+# langchain_pr_reviewer.py (parallel + caching, no streaming)
 import os
 import re
 import subprocess
+import concurrent.futures
+from time import sleep
 from dotenv import load_dotenv
-load_dotenv()
-
 from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
 from context_extractor import extract_related_context
 from param_type_analyzer import extract_function_definitions, extract_function_calls, resolve_param_types, find_odd_types
 from infer_type_ai import infer_type_ai
 
+load_dotenv()
 
 user_input_response = None
 
@@ -124,76 +124,98 @@ Tasks:
 3. Are there any logic or security issues?
 4. If unsure, ask a clear follow-up question starting with 'QUESTION:'.
 5. If confident, summarize only issues.
+
+Return your output using the following markdown format. You must include **every** section, even if the value is 'None'. Each section must start with a bullet like `- **Section Name**:` followed by a summary or `None`:
+- **Input Validation**: <summary or 'None'>
+- **Tenant Safety**: <summary or 'None'>
+- **Database Safety**: <summary or 'None'>
+- **Logic Issues**: <summary or 'None'>
+- **Security Concerns**: <summary or 'None'>
+
+Example output:
+- **Input Validation**: Function does not validate `$params['email']`.
+- **Tenant Safety**: `tenant()` is called with `$application->tenant_id`, but no check for null.
+- **Database Safety**: No checks for `save()` result.
+- **Logic Issues**: None
+- **Security Concerns**: None
+- **Input Validation**: <summary or 'None'>
+- **Tenant Safety**: Confirm if tenant ID is passed to tenant() calls. Trace its value and warn if null or missing.
+- **Database Safety**: <summary or 'None'>
+- **Logic Issues**: <summary or 'None'>
+- **Security Concerns**: <summary or 'None'>
 """)
     chain = prompt | llm
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     return chain, memory
 
-def run_review_with_callback(repo_path, base_branch, pr_branch, callback):
+def review_single_function(func, callback):
     global user_input_response
+    callback(f"🔍 Reviewing: {func['name']} in {func['file']}")
+    callback("📦 Analyzing function body...")
 
+    chain, memory = get_llm_chain()
+
+    try:
+        with open(func['file'], 'r', encoding='utf-8') as f:
+            full_code = f.read()
+    except Exception:
+        full_code = ""
+
+    extra = extract_related_context(func_body=func['body'], full_code=full_code)
+    extra_context_str = "\n".join(f"{key} =>\n{value}" for key, value in extra.items() if value)
+
+    funcs_all = extract_function_definitions(full_code)
+    calls_all = extract_function_calls(full_code)
+    all_param_types = resolve_param_types(funcs_all, calls_all)
+    odd_params = find_odd_types(all_param_types)
+    odd_param_report = "\n".join(f"{k}: {v}" for k, v in odd_params.items())
+
+    expressions_to_check = re.findall(r'(\$\w+(\[[^\]]+\])?(->\w+)?)', func['body'])
+    ai_type_results = []
+    for match in expressions_to_check:
+        expr = match[0].strip()
+        if expr:
+            callback(f"🧠 Inferring type for {expr}...")
+            ai_type = infer_type_ai(expr, context_code=full_code, current_class_name=func['name'])
+            ai_type_results.append(f"{expr} => {ai_type}")
+    ai_type_summary = "\n".join(ai_type_results)
+
+    inputs = {
+        "func_name": func['name'],
+        "file_path": func['file'],
+        "func_body": func['body'],
+        "extra_context": extra_context_str,
+        "odd_param_types": odd_param_report,
+        "ai_types": ai_type_summary,
+        "chat_history": memory.load_memory_variables({})["chat_history"]
+    }
+
+    output = chain.invoke(inputs)
+    print(output.content)
+
+    if output.content.strip().lower().startswith("question:"):
+        question = output.content.strip().split("QUESTION:", 1)[-1].strip()
+        callback("USER_INPUT_REQUEST::" + question)
+        user_input_response = None
+        while user_input_response is None:
+            sleep(0.5)
+        memory.chat_memory.add_user_message(user_input_response)
+        memory.chat_memory.add_ai_message(question)
+        output = chain.invoke(inputs)
+    if output.content.strip():
+        callback(f"❗ AI Feedback: {output.content.strip()}")
+    else:
+        callback("✅ No issues detected.")
+
+    callback("----------------------------------------")
+
+def run_review_with_callback(repo_path, base_branch, pr_branch, callback):
     funcs = get_changed_functions_with_bodies(base_branch, pr_branch, repo_path)
 
     if not funcs:
         callback("❌ No changed functions found.")
         return
 
-    for func in funcs:
-        callback(f"🔍 Reviewing: {func['name']} in {func['file']}")
-        callback("📦 Analyzing function body...")
-
-        chain, memory = get_llm_chain()
-
-        try:
-            with open(func['file'], 'r', encoding='utf-8') as f:
-                full_code = f.read()
-        except Exception:
-            full_code = ""
-
-        extra = extract_related_context(func_body=func['body'], full_code=full_code)
-        extra_context_str = "\n".join(f"{key} =>\n{value}" for key, value in extra.items() if value)
-
-        funcs_all = extract_function_definitions(full_code)
-        calls_all = extract_function_calls(full_code)
-        all_param_types = resolve_param_types(funcs_all, calls_all)
-        odd_params = find_odd_types(all_param_types)
-        odd_param_report = "\n".join(f"{k}: {v}" for k, v in odd_params.items())
-
-        expressions_to_check = re.findall(r'(\$\w+(\[[^\]]+\])?(->\w+)?)', func['body'])
-        ai_type_results = []
-        for match in expressions_to_check:
-            expr = match[0].strip()
-            if expr:
-                ai_type = infer_type_ai(expr, context_code=full_code, current_class_name=func['name'])
-                callback(f"🧠 Inferring type for {expr}...{ai_type}")
-                ai_type_results.append(f"{expr} => {ai_type}")
-        ai_type_summary = "\n".join(ai_type_results)
-
-        inputs = {
-            "func_name": func['name'],
-            "file_path": func['file'],
-            "func_body": func['body'],
-            "extra_context": extra_context_str,
-            "odd_param_types": odd_param_report,
-            "ai_types": ai_type_summary,
-            "chat_history": memory.load_memory_variables({})["chat_history"]
-        }
-
-        output = chain.invoke(inputs)
-
-        if output.content.strip().lower().startswith("question:"):
-            question = output.content.strip().split("QUESTION:", 1)[-1].strip()
-            callback("USER_INPUT_REQUEST::" + question)
-            user_input_response = None
-            while user_input_response is None:
-                sleep(0.5)
-            memory.chat_memory.add_user_message(user_input_response)
-            memory.chat_memory.add_ai_message(question)
-            output = chain.invoke(inputs)
-
-        if output.content.strip():
-            callback(f"❗ AI Feedback: {output.content.strip()}")
-        else:
-            callback("✅ No issues detected.")
-
-        callback("----------------------------------------")
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(review_single_function, func, callback) for func in funcs]
+        concurrent.futures.wait(futures)
