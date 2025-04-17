@@ -5,4 +5,4 @@ for initial setup
 2)./setup.sh
 
 for execution
-python3 interactive_langchain_reviewer.py
+python3 app.py
