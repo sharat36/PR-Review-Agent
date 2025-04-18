@@ -6,13 +6,6 @@ from langchain.chains import LLMChain
 from dotenv import load_dotenv
 load_dotenv()
 
-CACHE_PATH = "db_validation_cache.json"
-try:
-    with open(CACHE_PATH, 'r') as f:
-        _CACHE = json.load(f)
-except:
-    _CACHE = {}
-
 def _hash_content(func_body, context_code, full_code):
     key = func_body + "\n" + context_code + "\n" + full_code
     return hashlib.sha256(key.encode()).hexdigest()
@@ -34,10 +27,10 @@ File:
 {full_code}
 
 Look for:
-- Missing checks after `save()`, `update()`, or `find()` operations
-- Improper or risky query patterns
-- Unhandled database exceptions or null results
-- Deprecated MongoDB/Yii methods
+- Use of `save()`, `update()`, or `find()` without checking result
+- Improper criteria queries
+- Lack of error handling around DB ops
+- Use of deprecated EMongoDocument methods
 
 Respond with:
 - **Database Safety**: <summary or "None">
@@ -53,22 +46,15 @@ def validate(func_body: str, context_code: str, full_code: str) -> str:
     results = []
 
     for ctx, code in zip(context_batches, code_batches):
-        cache_key = _hash_content(func_body, ctx, code)
-        if cache_key in _CACHE:
-            text = _CACHE[cache_key]
-        else:
-            try:
-                result = chain.invoke({
-                    "func_body": func_body,
-                    "context_code": ctx,
-                    "full_code": code
-                })
-                text = result.get("text") or result.get("output") or ""
-                _CACHE[cache_key] = text
-                with open(CACHE_PATH, "w") as f:
-                    json.dump(_CACHE, f)
-            except Exception:
-                continue
+        try:
+            result = chain.invoke({
+                "func_body": func_body,
+                "context_code": ctx,
+                "full_code": code
+            })
+            text = result.get("text") or result.get("output") or ""
+        except Exception:
+            continue
         if text and "none" not in text.lower():
             results.append(text.strip())
 

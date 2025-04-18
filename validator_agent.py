@@ -7,13 +7,6 @@ from langchain.chains import LLMChain
 from dotenv import load_dotenv
 load_dotenv()
 
-# --- Cache path ---
-CACHE_PATH = "validator_cache.json"
-try:
-    with open(CACHE_PATH, 'r') as f:
-        _CACHE = json.load(f)
-except:
-    _CACHE = {}
 
 # --- Utility to hash each input combination ---
 def _hash_content(func_body, full_code, review_level):
@@ -61,22 +54,15 @@ Return only a comma-separated list of validators. No explanation.
     chain = LLMChain(prompt=prompt, llm=llm)
 
     for batch in code_batches:
-        cache_key = _hash_content(func_body, batch, review_level)
-        if cache_key in _CACHE:
-            raw = _CACHE[cache_key]
-        else:
-            try:
-                result = chain.invoke({
-                    "func_body": func_body,
-                    "review_level": review_level,
-                    "full_code": batch
-                })
-                raw = result.get("text") or result.get("output") or ""
-                _CACHE[cache_key] = raw
-                with open(CACHE_PATH, 'w') as f:
-                    json.dump(_CACHE, f)
-            except Exception:
-                continue
+        try:
+            result = chain.invoke({
+                "func_body": func_body,
+                "review_level": review_level,
+                "full_code": batch
+            })
+            raw = result.get("text") or result.get("output") or ""
+        except Exception:
+            continue
 
         for v in raw.split(","):
             v = v.strip()

@@ -7,12 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Cache path ---
-CACHE_PATH = "infer_type_cache.json"
-try:
-    with open(CACHE_PATH, 'r') as f:
-        _CACHE = json.load(f)
-except:
-    _CACHE = {}
+
 
 # --- Hashing utility for deduplication ---
 def _hash_content(func_body, context_code, full_code):
@@ -64,23 +59,17 @@ def infer_type(func_body: str, context_code: str, full_code: str, max_batch_line
 
     # Run across all batch pairs
     for i, (ctx, full) in enumerate(zip(context_batches, code_batches)):
-        cache_key = _hash_content(func_body, ctx, full)
-        if cache_key in _CACHE:
-            result = _CACHE[cache_key]
-        else:
-            try:
-                output = chain.invoke({
-                    "func_body": func_body,
-                    "context_code": ctx,
-                    "full_code": full
-                })
-                result_text = output.get("text") or output.get("output") or ""
-                result = json.loads(result_text.strip())
-                _CACHE[cache_key] = result
-                with open(CACHE_PATH, 'w') as f:
-                    json.dump(_CACHE, f)
-            except Exception:
-                continue  # skip failed batches
+        try:
+            output = chain.invoke({
+                "func_body": func_body,
+                "context_code": ctx,
+                "full_code": full
+            })
+            result_text = output.get("text") or output.get("output") or ""
+            result = json.loads(result_text.strip())
+            
+        except Exception:
+            continue  # skip failed batches
 
         # Merge batch result into global dict
         for k, v in result.items():
