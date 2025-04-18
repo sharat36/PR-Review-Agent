@@ -20,6 +20,9 @@ from validators import (
 from infer_type_ai import infer_type
 from review_prompt import review_prompt
 
+from dotenv import load_dotenv
+load_dotenv()
+
 user_input_response = None
 
 def set_user_input(answer: str):

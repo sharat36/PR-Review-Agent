@@ -3,6 +3,9 @@ from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
+from dotenv import load_dotenv
+load_dotenv()
+
 CACHE_PATH = "security_validation_cache.json"
 try:
     with open(CACHE_PATH, 'r') as f:

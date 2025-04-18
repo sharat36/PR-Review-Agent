@@ -4,6 +4,9 @@ from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # --- Cache path ---
 CACHE_PATH = "validator_cache.json"
 try:

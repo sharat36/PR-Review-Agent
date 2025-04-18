@@ -3,6 +3,8 @@ import hashlib
 from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
+from dotenv import load_dotenv
+load_dotenv()
 
 # --- Cache path ---
 CACHE_PATH = "infer_type_cache.json"
