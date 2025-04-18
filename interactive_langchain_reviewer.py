@@ -104,33 +104,38 @@ def get_changed_functions(repo_path, base_branch, pr_branch):
     return all_funcs
 
 
+
 def review_single_function(func, full_code, callback):
     func_key = f"{func['file'].strip()}::{func['name'].strip()}"
+    print(f"🔍 Reviewing function: {func_key}")
     callback(f"🔍 Reviewing: {func['name']} in {func['file']}")
 
-    # Suggest validators
+    start_time = time.time()
+
     try:
         suggested = suggest_validators(func['body'], full_code)
+        print(f"✅ Suggested: {suggested} for {func_key} completed in {time.time() - start_time:.2f}s")
     except Exception as e:
+        print(f"❌ Validator agent failed: {e}")
         callback(f"❌ Validator agent failed: {e}")
         suggested = []
 
     if not suggested:
-        callback(f"ℹ️ No validators suggested.")
+        callback("ℹ️ No validators suggested.")
         return
 
     callback(f"STREAM::{func_key}::Selected validators: {', '.join(suggested)}")
-
-    # Context and type info
+    
+    start_time1 = time.time()
     context_code = extract_related_context(func['body'], func['full_file_code'], func['file'])
     type_info = infer_type(func['body'], context_code, func['full_file_code'])
+    print(f"✅ Type inference complete for {func_key}. completed in {time.time() - start_time1:.2f}s")
+
     type_summary = "\n".join(
-        f"- {var}: {', '.join(f'{t} ({c})' for t, c in types.items())}"
+        f"- {var}: {', '.join(f'{t} ({c})' for t, c in types.items())}" if isinstance(types, dict) else f"- {var}: {types}"
         for var, types in type_info.items()
-        if isinstance(types, dict)
     )
 
-    # Run validators in parallel
     validator_map = {
         "input_validation": input_validation.validate,
         "tenant_validation": tenant_validation.validate,
@@ -148,24 +153,41 @@ def review_single_function(func, full_code, callback):
         for future in as_completed(futures):
             name = futures[future]
             try:
+                start = time()
                 result = future.result(timeout=20)
+                duration = time() - start
                 if result and result.strip().lower() != "none":
                     results.append(result)
+                    print(f"✅ {name} validator passed for {func_key} in {duration:.2f}s.")
+                else:
+                    print(f"ℹ️ {name} validator returned 'none' for {func_key} in {duration:.2f}s.")
             except Exception as e:
                 results.append(f"- **{name}**: ❌ Error: {str(e)}")
 
     combined = "\n".join(results) + "\n\nInferred Types:\n" + type_summary
 
-    # AI Review Chain
+    changed_lines = func.get("changed_lines", [])
+    func_lines = func['body'].splitlines()
+    changed_code = [
+        func_lines[ln - 1].strip()
+        for ln in changed_lines
+        if 0 < ln <= len(func_lines)
+    ]
+
     memory = ConversationBufferMemory(memory_key="chat_history", input_key="func_body")
     llm = ChatOpenAI(model_name="gpt-4", temperature=0)
     chain = LLMChain(prompt=review_prompt, llm=llm, memory=memory)
 
-    output = chain.invoke({
-        "func_body": func['body'],
-        "combined": combined,
-        "chat_history": ""
-    })
+    try:
+        output = chain.invoke({
+            "func_body": func['body'],
+            "combined": combined,
+            "chat_history": "",
+            "changed_lines": "\n".join(changed_code)
+        })
+    except Exception as e:
+        callback(f"❌ AI Review failed: {str(e)}")
+        return
 
     response_text = output.get("text") or output.get("output") or ""
     question_line = next((line for line in response_text.splitlines() if line.lower().startswith("question:")), None)
@@ -173,11 +195,9 @@ def review_single_function(func, full_code, callback):
     if not question_line:
         safe_response = response_text.strip().replace("\n", "\\n")
         callback(f"STREAM::{func_key}::{safe_response}✅ Done")
-        return  # ✅ Done here if no clarification needed
+        return
 
-    # Ask user for clarification
     callback(f"USER_INPUT_REQUEST::{func_key}::{question_line.split(':', 1)[-1].strip()}")
-    global user_input_response
     user_input_response = None
     while user_input_response is None:
         time.sleep(0.5)
@@ -185,20 +205,23 @@ def review_single_function(func, full_code, callback):
     memory.chat_memory.add_user_message(user_input_response)
     memory.chat_memory.add_ai_message(question_line)
 
-    # Re-run with clarification
     final_output = chain.invoke({
         "func_body": func['body'],
         "combined": combined,
-        "chat_history": memory.buffer
+        "chat_history": memory.buffer,
+        "changed_lines": "\n".join(changed_code)
     })
 
     final_response = final_output.get("text") or final_output.get("output") or ""
     safe_final = final_response.strip().replace("\n", "\\n")
     callback(f"STREAM::{func_key}::{safe_final}✅ Done")
+    print(f"✅ Total review for {func_key} completed in {time.time() - start_time:.2f}s")
 
 def run_review_with_callback(repo_path, base_branch, pr_branch, callback):
     callback(f"📦 Repo: {repo_path}")
+    start_time = time.time()
     changed = get_changed_functions(repo_path, base_branch, pr_branch)
+    print(f"✅ fetched changed functions completed in {time.time() - start_time:.2f}s")
 
     if not changed:
         callback("✅ No changed functions found.")
