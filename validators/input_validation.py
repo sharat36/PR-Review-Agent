@@ -1,11 +1,25 @@
-from langchain_openai import ChatOpenAI
-from infer_type_ai import infer_type
+import json, hashlib
+from langchain_community.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
-def validate(func_body: str, context_code: str, full_file_code: str) -> str:
-    prompt = f"""
-You are an expert PHP reviewer.
+CACHE_PATH = "input_validation_cache.json"
+try:
+    with open(CACHE_PATH, 'r') as f:
+        _CACHE = json.load(f)
+except:
+    _CACHE = {}
 
-Check the following function for **missing or weak input validation**.
+def _hash_content(func_body, context_code, full_code):
+    key = func_body + "\n" + context_code + "\n" + full_code
+    return hashlib.sha256(key.encode()).hexdigest()
+
+def split_into_batches(lines, batch_size=200):
+    for i in range(0, len(lines), batch_size):
+        yield "\n".join(lines[i:i + batch_size])
+
+prompt = PromptTemplate.from_template("""
+You are reviewing the function below for **input validation issues**.
 
 Function:
 {func_body}
@@ -13,32 +27,46 @@ Function:
 Context:
 {context_code}
 
+File:
+{full_code}
+
 Look for:
-- Use of `$params` or `$post_data` without checks
-- Accessing user input without type or null validation
-- Assumptions on object properties or structure
+- Missing type checks for parameters
+- Null checks missing before accessing keys/fields
+- Unexpected inputs not handled
+- Trusting input data blindly
 
-Respond in markdown:
-- **Input Validation**: <summary or 'None'>
-"""
-    try:
-        llm = ChatOpenAI(model="gpt-4", temperature=0)
-        response = llm.invoke(prompt).content.strip()
-    except Exception as e:
-        response = f"- **Input Validation**: ❌ AI Error: {e}"
+Respond with:
+- **Input Validation**: <summary or "None">
+""")
 
-    # infer_type_ai supplement
-    try:
-        type_info = infer_type(func_body, context_code, full_file_code)
-        issues = []
-        for var, types in type_info.items():
-            if 'null' in types:
-                issues.append(f"`{var}` may be null.")
-            if 'unknown' in types:
-                issues.append(f"`{var}` has unknown type.")
-        if issues:
-            response += "\n- **Type-Based Checks**:\n" + "\n".join(f"  - {i}" for i in issues)
-    except Exception as e:
-        response += f"\n- **Type-Based Checks**: ❌ Error: {e}"
+llm = ChatOpenAI(model_name="gpt-4", temperature=0)
+chain = LLMChain(prompt=prompt, llm=llm)
 
-    return response
+def validate(func_body: str, context_code: str, full_code: str) -> str:
+    func_body = "\n".join(func_body.splitlines()[:100])
+    context_batches = list(split_into_batches(context_code.splitlines()))
+    code_batches = list(split_into_batches(full_code.splitlines()))
+    results = []
+
+    for ctx, code in zip(context_batches, code_batches):
+        cache_key = _hash_content(func_body, ctx, code)
+        if cache_key in _CACHE:
+            text = _CACHE[cache_key]
+        else:
+            try:
+                result = chain.invoke({
+                    "func_body": func_body,
+                    "context_code": ctx,
+                    "full_code": code
+                })
+                text = result.get("text") or result.get("output") or ""
+                _CACHE[cache_key] = text
+                with open(CACHE_PATH, "w") as f:
+                    json.dump(_CACHE, f)
+            except Exception:
+                continue
+        if text and "none" not in text.lower():
+            results.append(text.strip())
+
+    return "\n".join(results) if results else "None"

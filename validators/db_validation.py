@@ -1,11 +1,25 @@
-from langchain_openai import ChatOpenAI
-from infer_type_ai import infer_type
+import json, hashlib
+from langchain_community.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
-def validate(func_body: str, context_code: str, full_file_code: str) -> str:
-    prompt = f"""
-You are a reviewer for MongoDB/Yii PHP applications.
+CACHE_PATH = "db_validation_cache.json"
+try:
+    with open(CACHE_PATH, 'r') as f:
+        _CACHE = json.load(f)
+except:
+    _CACHE = {}
 
-Check the following function for **database interaction safety**:
+def _hash_content(func_body, context_code, full_code):
+    key = func_body + "\n" + context_code + "\n" + full_code
+    return hashlib.sha256(key.encode()).hexdigest()
+
+def split_into_batches(lines, batch_size=200):
+    for i in range(0, len(lines), batch_size):
+        yield "\n".join(lines[i:i + batch_size])
+
+prompt = PromptTemplate.from_template("""
+You are reviewing the function below for **database safety and correctness**.
 
 Function:
 {func_body}
@@ -13,32 +27,46 @@ Function:
 Context:
 {context_code}
 
-Consider:
-- Use of `save()`, `update()`, or `find()` without checking result
-- Improper criteria queries
-- Lack of error handling around DB ops
-- Use of deprecated EMongoDocument methods
+File:
+{full_code}
 
-Return your result in this format:
-- **Database Safety**: <summary or 'None'>
-"""
-    try:
-        llm = ChatOpenAI(model="gpt-4", temperature=0)
-        response = llm.invoke(prompt).content.strip()
-    except Exception as e:
-        response = f"- **Database Safety**: ❌ AI Error: {e}"
+Look for:
+- Missing checks after `save()`, `update()`, or `find()` operations
+- Improper or risky query patterns
+- Unhandled database exceptions or null results
+- Deprecated MongoDB/Yii methods
 
-    try:
-        types = infer_type(func_body, context_code, full_file_code)
-        flags = []
-        if 'save()' in func_body and 'if' not in func_body:
-            flags.append("No `save()` result check found.")
-        for var, t in types.items():
-            if 'criteria' in var and 'null' in t:
-                flags.append(f"`{var}` may be null before DB operation.")
-        if flags:
-            response += "\n- **Type-Based Checks**:\n" + "\n".join(f"  - {f}" for f in flags)
-    except Exception as e:
-        response += f"\n- **Type-Based Checks**: ❌ Error: {e}"
+Respond with:
+- **Database Safety**: <summary or "None">
+""")
 
-    return response
+llm = ChatOpenAI(model_name="gpt-4", temperature=0)
+chain = LLMChain(prompt=prompt, llm=llm)
+
+def validate(func_body: str, context_code: str, full_code: str) -> str:
+    func_body = "\n".join(func_body.splitlines()[:100])
+    context_batches = list(split_into_batches(context_code.splitlines()))
+    code_batches = list(split_into_batches(full_code.splitlines()))
+    results = []
+
+    for ctx, code in zip(context_batches, code_batches):
+        cache_key = _hash_content(func_body, ctx, code)
+        if cache_key in _CACHE:
+            text = _CACHE[cache_key]
+        else:
+            try:
+                result = chain.invoke({
+                    "func_body": func_body,
+                    "context_code": ctx,
+                    "full_code": code
+                })
+                text = result.get("text") or result.get("output") or ""
+                _CACHE[cache_key] = text
+                with open(CACHE_PATH, "w") as f:
+                    json.dump(_CACHE, f)
+            except Exception:
+                continue
+        if text and "none" not in text.lower():
+            results.append(text.strip())
+
+    return "\n".join(results) if results else "None"

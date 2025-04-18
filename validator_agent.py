@@ -1,50 +1,83 @@
-# validator_agent.py
-import os
-from openai import OpenAI
-from dotenv import load_dotenv
+import json
+import hashlib
+from langchain_community.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
-load_dotenv()
+# --- Cache path ---
+CACHE_PATH = "validator_cache.json"
+try:
+    with open(CACHE_PATH, 'r') as f:
+        _CACHE = json.load(f)
+except:
+    _CACHE = {}
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# --- Utility to hash each input combination ---
+def _hash_content(func_body, full_code, review_level):
+    key = func_body + "\n" + full_code + "\n" + review_level
+    return hashlib.sha256(key.encode()).hexdigest()
 
-AVAILABLE_VALIDATORS = [
-    "input_validation",
-    "tenant_validation",
-    "security_validation",
-    "logic_validation",
-    "db_validation"
-]
+# --- Batch Utility ---
+def split_into_batches(lines, batch_size):
+    for i in range(0, len(lines), batch_size):
+        yield "\n".join(lines[i:i + batch_size])
 
-def suggest_validators(func_body: str, context_code: str) -> list[str]:
-    prompt = f"""
-You are an intelligent agent assisting a static code analyzer.
+# --- Main Function ---
+def suggest_validators(func_body: str, full_code: str, review_level: str = "standard") -> list:
+    func_body = "\n".join(func_body.splitlines()[:100])  # safe trim
 
-Based on the function and its context, select the most relevant validation categories from the following:
-- input_validation
-- tenant_validation
-- security_validation
-- logic_validation
-- db_validation
+    code_lines = full_code.splitlines()
+    code_batches = list(split_into_batches(code_lines, 200))
+
+    all_validators = set()
+
+    prompt = PromptTemplate.from_template("""
+You are an expert code reviewer for a PHP/Yii/MongoDB codebase.
+
+Based on the provided function and review level, select the most appropriate validators to apply.
 
 Function:
 {func_body}
 
+Review Level: {review_level}
+
 Context:
-{context_code}
+{full_code}
 
-Return a comma-separated list of only the relevant validator names (e.g., input_validation, db_validation). Do not include any explanation.
-"""
+Choose from:
+- input_validation
+- tenant_validation
+- logic_validation
+- db_validation
+- security_validation
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=50
-        )
-        output = response.choices[0].message.content.strip()
-        selected = [v.strip() for v in output.split(",") if v.strip() in AVAILABLE_VALIDATORS]
-        return selected
-    except Exception as e:
-        print("❌ validator_agent error:", e)
-        return AVAILABLE_VALIDATORS  # fallback to run all
+Return only a comma-separated list of validators. No explanation.
+""")
+
+    llm = ChatOpenAI(model_name="gpt-4", temperature=0)
+    chain = LLMChain(prompt=prompt, llm=llm)
+
+    for batch in code_batches:
+        cache_key = _hash_content(func_body, batch, review_level)
+        if cache_key in _CACHE:
+            raw = _CACHE[cache_key]
+        else:
+            try:
+                result = chain.invoke({
+                    "func_body": func_body,
+                    "review_level": review_level,
+                    "full_code": batch
+                })
+                raw = result.get("text") or result.get("output") or ""
+                _CACHE[cache_key] = raw
+                with open(CACHE_PATH, 'w') as f:
+                    json.dump(_CACHE, f)
+            except Exception:
+                continue
+
+        for v in raw.split(","):
+            v = v.strip()
+            if v:
+                all_validators.add(v)
+
+    return list(all_validators)

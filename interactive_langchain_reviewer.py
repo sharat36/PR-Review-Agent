@@ -119,11 +119,12 @@ def review_single_function(func, full_code, callback):
     callback(f"STREAM::{func_key}::Selected validators: {', '.join(suggested)}")
 
     # Context and type info
-    context_code = extract_related_context(func['body'], func['full_file_code'])
+    context_code = extract_related_context(func['body'], func['full_file_code'], func['file'])
     type_info = infer_type(func['body'], context_code, func['full_file_code'])
     type_summary = "\n".join(
         f"- {var}: {', '.join(f'{t} ({c})' for t, c in types.items())}"
         for var, types in type_info.items()
+        if isinstance(types, dict)
     )
 
     # Run validators in parallel
@@ -168,7 +169,7 @@ def review_single_function(func, full_code, callback):
 
     if not question_line:
         safe_response = response_text.strip().replace("\n", "\\n")
-        callback(f"STREAM::{func_key}::{safe_response}")
+        callback(f"STREAM::{func_key}::{safe_response}✅ Done")
         return  # ✅ Done here if no clarification needed
 
     # Ask user for clarification
@@ -190,7 +191,7 @@ def review_single_function(func, full_code, callback):
 
     final_response = final_output.get("text") or final_output.get("output") or ""
     safe_final = final_response.strip().replace("\n", "\\n")
-    callback(f"STREAM::{func_key}::{safe_final}")
+    callback(f"STREAM::{func_key}::{safe_final}✅ Done")
 
 def run_review_with_callback(repo_path, base_branch, pr_branch, callback):
     callback(f"📦 Repo: {repo_path}")

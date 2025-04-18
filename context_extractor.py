@@ -1,34 +1,24 @@
 import re
 import os
 
-def extract_related_context(func_body: str, full_code: str) -> str:
+def extract_related_context(func_body: str, full_code: str, file_path: str = None) -> str:
     context = ""
 
-    # Extract model class from usage like static::model()
-    model_match = re.search(r'(\w+)::model\(\)', func_body)
-    model_class = model_match.group(1) if model_match else None
+    # Extract model class used inside the function
 
-    # If a model is detected, extract its class code
-    if model_class:
+    for model_class in extract_model_classes(func_body, file_path):
         context += get_class_code(model_class, full_code)
-
-        # If model extends a parent class, include parent's methods like tenant()
-        parent_class = get_parent_class(model_class, full_code)
-        if parent_class:
-            context += get_method_code(parent_class, "tenant", full_code)
-            context += get_method_code(parent_class, "save", full_code)
-
-        # Also extract tenant() and save() if overridden in model itself
         context += get_method_code(model_class, "tenant", full_code)
         context += get_method_code(model_class, "save", full_code)
+        parent = get_parent_class(model_class, full_code)
+        if parent:
+            context += get_method_code(parent, "tenant", full_code)
+            context += get_method_code(parent, "save", full_code)
 
     return context
 
 
 def get_class_code(class_name: str, code: str) -> str:
-    """
-    Extract full class definition (excluding method bodies) for summary context.
-    """
     pattern = rf'class\s+{re.escape(class_name)}\b.*?\{{.*?^\}}'
     match = re.search(pattern, code, re.DOTALL | re.MULTILINE)
     if match:
@@ -37,9 +27,6 @@ def get_class_code(class_name: str, code: str) -> str:
 
 
 def get_method_code(class_name: str, method_name: str, code: str) -> str:
-    """
-    Extract a method from the class body (roughly) using brace matching.
-    """
     pattern = rf'class\s+{re.escape(class_name)}.*?\{{(.*?)^\}}'
     class_match = re.search(pattern, code, re.DOTALL | re.MULTILINE)
     if not class_match:
@@ -70,9 +57,21 @@ def get_method_code(class_name: str, method_name: str, code: str) -> str:
 
 
 def get_parent_class(class_name: str, code: str) -> str:
-    """
-    Get parent class from definition like: class Foo extends Bar
-    """
     pattern = rf'class\s+{re.escape(class_name)}\s+extends\s+(\w+)'
     match = re.search(pattern, code)
     return match.group(1) if match else None
+
+
+def extract_model_classes(func_body: str, fallback_file_path: str = None) -> list[str]:
+    matches = re.findall(r'(\w+)::model\(\)', func_body)
+    model_classes = set()
+
+    for match in matches:
+        if match == "static" and fallback_file_path:
+            filename = os.path.basename(fallback_file_path)
+            if filename.lower().endswith('.php'):
+                model_classes.add(filename[:-4])
+        elif match != "static":
+            model_classes.add(match)
+
+    return list(model_classes)

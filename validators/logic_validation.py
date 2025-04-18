@@ -1,11 +1,25 @@
-from langchain_openai import ChatOpenAI
-from infer_type_ai import infer_type
+import json, hashlib
+from langchain_community.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
-def validate(func_body: str, context_code: str, full_file_code: str) -> str:
-    prompt = f"""
-You are a PHP code logic reviewer.
+CACHE_PATH = "logic_validation_cache.json"
+try:
+    with open(CACHE_PATH, 'r') as f:
+        _CACHE = json.load(f)
+except:
+    _CACHE = {}
 
-Check this function for **unreachable logic, faulty conditions, or bad assumptions**.
+def _hash_content(func_body, context_code, full_code):
+    key = func_body + "\n" + context_code + "\n" + full_code
+    return hashlib.sha256(key.encode()).hexdigest()
+
+def split_into_batches(lines, batch_size=200):
+    for i in range(0, len(lines), batch_size):
+        yield "\n".join(lines[i:i + batch_size])
+
+prompt = PromptTemplate.from_template("""
+You are reviewing the function below for **business logic issues**.
 
 Function:
 {func_body}
@@ -13,32 +27,47 @@ Function:
 Context:
 {context_code}
 
-Mention:
-- Misused null coalescing
-- Unchecked branches
-- Logic based on unsafe assumptions
+File:
+{full_code}
 
-Return:
-- **Logic Validation**: <summary or 'None'>
-"""
-    try:
-        llm = ChatOpenAI(model="gpt-4", temperature=0)
-        response = llm.invoke(prompt).content.strip()
-    except Exception as e:
-        response = f"- **Logic Validation**: ❌ AI Error: {e}"
+Look for:
+- Invalid assumptions
+- Missing edge case handling
+- Incorrect conditional logic
+- Unexpected behaviors
+- Broken flows or sequence of steps
 
-    try:
-        types = infer_type(func_body, context_code, full_file_code)
-        issues = []
-        for var, t in types.items():
-            keys = t.keys()
-            if 'object' in keys and 'string' in keys:
-                issues.append(f"`{var}` used as both object and string.")
-            if 'null' in keys and 'bool' in keys:
-                issues.append(f"`{var}` used in boolean condition but may be null.")
-        if issues:
-            response += "\n- **Type-Based Checks**:\n" + "\n".join(f"  - {i}" for i in issues)
-    except Exception as e:
-        response += f"\n- **Type-Based Checks**: ❌ Error: {e}"
+Respond with:
+- **Logic Validation**: <summary or "None">
+""")
 
-    return response
+llm = ChatOpenAI(model_name="gpt-4", temperature=0)
+chain = LLMChain(prompt=prompt, llm=llm)
+
+def validate(func_body: str, context_code: str, full_code: str) -> str:
+    func_body = "\n".join(func_body.splitlines()[:100])
+    context_batches = list(split_into_batches(context_code.splitlines()))
+    code_batches = list(split_into_batches(full_code.splitlines()))
+    results = []
+
+    for ctx, code in zip(context_batches, code_batches):
+        cache_key = _hash_content(func_body, ctx, code)
+        if cache_key in _CACHE:
+            text = _CACHE[cache_key]
+        else:
+            try:
+                result = chain.invoke({
+                    "func_body": func_body,
+                    "context_code": ctx,
+                    "full_code": code
+                })
+                text = result.get("text") or result.get("output") or ""
+                _CACHE[cache_key] = text
+                with open(CACHE_PATH, "w") as f:
+                    json.dump(_CACHE, f)
+            except Exception:
+                continue
+        if text and "none" not in text.lower():
+            results.append(text.strip())
+
+    return "\n".join(results) if results else "None"

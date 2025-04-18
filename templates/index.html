@@ -117,10 +117,21 @@
       color: #00a87d;
       cursor: pointer;
     }
+    .loader {
+      background-image: url('/static/darwin_sense.gif');
+      background-size: 100% 100%;
+      background-repeat: no-repeat;
+      width: 50px;           /* Size of just the GIF */
+      height: 50px;
+      display: inline-block;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+
   </style>
 </head>
 <body>
-  <h1>🔍 AI PR Reviewer</h1>
+  <h1>PR Review AI Agent</h1>
 
   <form id="startForm">
     <input type="text" name="repo" placeholder="/full/path/to/repo" required>
@@ -161,6 +172,9 @@
         toggle.innerHTML = "➖";
         toggle.className = "toggle-button";
 
+        const loader = document.createElement("div");
+        loader.classList.add("loader");
+
         const body = document.createElement("div");
         body.classList.add("func-body");
 
@@ -170,12 +184,13 @@
         };
 
         header.appendChild(title);
+        header.appendChild(loader);
         header.appendChild(toggle);
         card.appendChild(header);
         card.appendChild(body);
         streamContainer.appendChild(card);
 
-        functionCards[funcKey] = { card, body };
+        functionCards[funcKey] = { card, body, loader };
         console.log("✅ Card created for:", funcKey);
         return;
       }
@@ -199,7 +214,13 @@
           const div = document.createElement("div");
           div.innerHTML = content;
           card.body.appendChild(div);
+
+          if (content.includes("✅ Done") && card.loader) {
+            card.loader.style.display = "none";
+          }
         } else if (type === "USER_INPUT_REQUEST") {
+          if (card.loader) card.loader.style.display = "none";
+
           const replyBox = document.createElement("div");
           replyBox.classList.add("reply-box");
           replyBox.innerHTML = `
