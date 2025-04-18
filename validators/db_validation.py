@@ -1,63 +1,57 @@
+
 import json, hashlib
 from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
-
 from dotenv import load_dotenv
+
 load_dotenv()
 
-def _hash_content(func_body, context_code, full_code):
-    key = func_body + "\n" + context_code + "\n" + full_code
-    return hashlib.sha256(key.encode()).hexdigest()
+CACHE_PATH = "db_validation_cache.json"
+try:
+    with open(CACHE_PATH, 'r') as f:
+        _CACHE = json.load(f)
+except:
+    _CACHE = {}
 
-def split_into_batches(lines, batch_size=200):
-    for i in range(0, len(lines), batch_size):
-        yield "\n".join(lines[i:i + batch_size])
+def _hash_content(code):
+    return hashlib.sha256(code.encode()).hexdigest()
 
 prompt = PromptTemplate.from_template("""
-You are reviewing the function below for **database safety and correctness**.
+You are a PHP reviewer for MongoDB/Yii-based applications.
 
-Function:
-{func_body}
+Changed Lines:
+{changed_code}
 
-Context:
-{context_code}
-
-File:
+Full File:
 {full_code}
 
-Look for:
-- Focus on improper use of `find()`, `findAll()`, `save()`, or `update()` without any filters or result checks
-- ⚠️ Flag if `EMongoCriteria` is created but **not used** in the `find()` or `findAll()` call
-- ⚠️ Also flag if `findAll()` is called without any criteria or filtering
-- ⚠️ Also warn if `tenant()` is used but `tenant_id` is not validated
-- Provide concise output like:
-  - **Database Safety**: <bullet point>
+Focus only on the changed lines.
 
-Respond with:
-- **Database Safety**: <summary or "None">
+If a new `select()` is introduced above an existing `save()` or `saveAttributes()`, does this change create a risk of partial document overwrite?
+
+Respond only if there's a risk. Otherwise say "None".
 """)
 
 llm = ChatOpenAI(model_name="gpt-4", temperature=0)
 chain = LLMChain(prompt=prompt, llm=llm)
 
-def validate(func_body: str, context_code: str, full_code: str) -> str:
-    func_body = "\n".join(func_body.splitlines()[:100])
-    context_batches = list(split_into_batches(context_code.splitlines()))
-    code_batches = list(split_into_batches(full_code.splitlines()))
-    results = []
+def validate(changed_lines: list[str], full_code: str) -> str:
+    changed_code = "\n".join(changed_lines)
+    cache_key = _hash_content(changed_code + full_code)
 
-    for ctx, code in zip(context_batches, code_batches):
-        try:
-            result = chain.invoke({
-                "func_body": func_body,
-                "context_code": ctx,
-                "full_code": code
-            })
-            text = result.get("text") or result.get("output") or ""
-        except Exception:
-            continue
-        if text and "none" not in text.lower():
-            results.append(text.strip())
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]
 
-    return "\n".join(results) if results else "None"
+    try:
+        result = chain.invoke({
+        "changed_code": changed_code,
+            "full_code": full_code
+        })
+        text = result.get("text") or result.get("output") or "None"
+        _CACHE[cache_key] = text
+        with open(CACHE_PATH, "w") as f:
+            json.dump(_CACHE, f)
+        return text
+    except Exception as e:
+        return f"Error: {e}"

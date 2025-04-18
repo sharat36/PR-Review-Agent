@@ -81,11 +81,15 @@ def get_changed_functions(repo_path, base_branch, pr_branch):
                         break
                     j += 1
 
+
+                changed_line_numbers = set(int(ln) for ln in changed_lines)  # convert all to int
+                changed_line_texts = [lines[i - 1].strip() for i in changed_line_numbers if 0 < i <= len(lines)]
                 funcs.append({
                     "name": func_name,
                     "file": filepath,
                     "body": ''.join(body_lines).strip(),
-                    "full_file_code": ''.join(lines)
+                    "full_file_code": ''.join(lines),
+                    "changed_lines": changed_line_texts
                 })
             return funcs
         except Exception:
@@ -127,8 +131,8 @@ def review_single_function(func, full_code, callback):
     callback(f"STREAM::{func_key}::Selected validators: {', '.join(suggested)}")
     
     start_time1 = time.time()
-    context_code = extract_related_context(func['body'], func['full_file_code'], func['file'])
-    type_info = infer_type(func['body'], context_code, func['full_file_code'])
+    context_code = extract_related_context(func['body'], full_code, func['file'])
+    type_info = infer_type(func['body'], context_code, full_code)
     print(f"✅ Type inference complete for {func_key}. completed in {time.time() - start_time1:.2f}s")
 
     type_summary = "\n".join(
@@ -136,6 +140,11 @@ def review_single_function(func, full_code, callback):
         for var, types in type_info.items()
     )
 
+    # Step 3: Prepare changed lines
+    changed_lines = func.get("changed_lines", [])
+    changed_code = [line.strip() for line in changed_lines if isinstance(line, str)]
+
+    # Step 4: Run Validators
     validator_map = {
         "input_validation": input_validation.validate,
         "tenant_validation": tenant_validation.validate,
@@ -147,32 +156,25 @@ def review_single_function(func, full_code, callback):
     results = []
     with ThreadPoolExecutor() as executor:
         futures = {
-            executor.submit(validator_map[name], func['body'], context_code, func['full_file_code']): name
+            executor.submit(validator_map[name], context_code, func['full_file_code']): name
             for name in suggested if name in validator_map
         }
         for future in as_completed(futures):
             name = futures[future]
             try:
-                start = time()
+                start = time.time()
                 result = future.result(timeout=20)
-                duration = time() - start
+                duration = time.time() - start
                 if result and result.strip().lower() != "none":
                     results.append(result)
                     print(f"✅ {name} validator passed for {func_key} in {duration:.2f}s.")
                 else:
                     print(f"ℹ️ {name} validator returned 'none' for {func_key} in {duration:.2f}s.")
             except Exception as e:
+                print(f"❌ {name} validator crashed for {func_key}: {e}")
                 results.append(f"- **{name}**: ❌ Error: {str(e)}")
 
     combined = "\n".join(results) + "\n\nInferred Types:\n" + type_summary
-
-    changed_lines = func.get("changed_lines", [])
-    func_lines = func['body'].splitlines()
-    changed_code = [
-        func_lines[ln - 1].strip()
-        for ln in changed_lines
-        if 0 < ln <= len(func_lines)
-    ]
 
     memory = ConversationBufferMemory(memory_key="chat_history", input_key="func_body")
     llm = ChatOpenAI(model_name="gpt-4", temperature=0)
@@ -198,6 +200,7 @@ def review_single_function(func, full_code, callback):
         return
 
     callback(f"USER_INPUT_REQUEST::{func_key}::{question_line.split(':', 1)[-1].strip()}")
+    global user_input_response
     user_input_response = None
     while user_input_response is None:
         time.sleep(0.5)

@@ -1,9 +1,10 @@
+
 import json, hashlib
 from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
-
 from dotenv import load_dotenv
+
 load_dotenv()
 
 CACHE_PATH = "logic_validation_cache.json"
@@ -13,64 +14,45 @@ try:
 except:
     _CACHE = {}
 
-def _hash_content(func_body, context_code, full_code):
-    key = func_body + "\n" + context_code + "\n" + full_code
-    return hashlib.sha256(key.encode()).hexdigest()
-
-def split_into_batches(lines, batch_size=200):
-    for i in range(0, len(lines), batch_size):
-        yield "\n".join(lines[i:i + batch_size])
+def _hash_content(code):
+    return hashlib.sha256(code.encode()).hexdigest()
 
 prompt = PromptTemplate.from_template("""
-You are reviewing the function below for **business logic issues**.
+You are reviewing changes to a PHP function for logic correctness.
 
-Function:
-{func_body}
+Changed Lines:
+{changed_code}
 
-Context:
-{context_code}
-
-File:
+Full File:
 {full_code}
 
-Look for:
-- Invalid assumptions
-- Missing edge case handling
-- Incorrect conditional logic
-- Unexpected behaviors
-- Broken flows or sequence of steps
+Focus on:
+- Null checks
+- Assumptions on variable state
+- Edge cases in new conditions
 
-Respond with:
-- **Logic Validation**: <summary or "None">
+Only return issues caused by changed lines. Otherwise say "None".
 """)
 
 llm = ChatOpenAI(model_name="gpt-4", temperature=0)
 chain = LLMChain(prompt=prompt, llm=llm)
 
-def validate(func_body: str, context_code: str, full_code: str) -> str:
-    func_body = "\n".join(func_body.splitlines()[:100])
-    context_batches = list(split_into_batches(context_code.splitlines()))
-    code_batches = list(split_into_batches(full_code.splitlines()))
-    results = []
+def validate(changed_lines: list[str], full_code: str) -> str:
+    changed_code = "\n".join(changed_lines)
+    cache_key = _hash_content(changed_code + full_code)
 
-    for ctx, code in zip(context_batches, code_batches):
-        cache_key = _hash_content(func_body, ctx, code)
-        if cache_key in _CACHE:
-            text = _CACHE[cache_key]
-        else:
-            try:
-                result = chain.invoke({
-                    "func_body": func_body,
-                    "context_code": ctx,
-                    "full_code": code
-                })
-                text = result.get("text") or result.get("output") or ""
-                _CACHE[cache_key] = text
-                with open(CACHE_PATH, "w") as f:
-                    json.dump(_CACHE, f)
-            except Exception:
-                continue
-        if text and "none" not in text.lower():
-            results.append(text.strip())
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]
 
-    return "\n".join(results) if results else "None"
+    try:
+        result = chain.invoke({
+            "changed_code": changed_code,
+            "full_code": full_code
+        })
+        text = result.get("text") or result.get("output") or "None"
+        _CACHE[cache_key] = text
+        with open(CACHE_PATH, "w") as f:
+            json.dump(_CACHE, f)
+        return text
+    except Exception as e:
+        return f"Error: {e}"
