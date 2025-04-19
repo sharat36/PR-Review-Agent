@@ -47,9 +47,9 @@ def validate(changed_lines: list[str], full_code: str) -> str:
             "full_code": full_code
         })
         text = result.get("text") or result.get("output") or "None"
-        _CACHE[cache_key] = text
-        with open(CACHE_PATH, "w") as f:
-            json.dump(_CACHE, f)
+        # _CACHE[cache_key] = text
+        # with open(CACHE_PATH, "w") as f:
+        #     json.dump(_CACHE, f)
         return text
     except Exception as e:
         return f"Error: {e}"

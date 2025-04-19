@@ -156,7 +156,7 @@ def review_single_function(func, full_code, callback):
     results = []
     with ThreadPoolExecutor() as executor:
         futures = {
-            executor.submit(validator_map[name], context_code, func['full_file_code']): name
+            executor.submit(validator_map[name], changed_code, func['body']): name
             for name in suggested if name in validator_map
         }
         for future in as_completed(futures):

@@ -28,9 +28,12 @@ Full File:
 
 Focus only on the changed lines.
 
-If a new `select()` is introduced above an existing `save()` or `saveAttributes()`, does this change create a risk of partial document overwrite?
-
-Respond only if there's a risk. Otherwise say "None".
+please consider these changes as risk
+- If a new `select()` is introduced above an existing `save()` or `saveAttributes()`.
+- If we fetch a object using select and try to access any variable of that object which is not there in select
+- If `EMongoCriteria` is created but **not used** in the `find()` or `findAll()` call
+- If `findAll()` is called without any criteria or filtering
+".
 """)
 
 llm = ChatOpenAI(model_name="gpt-4", temperature=0)
@@ -44,14 +47,15 @@ def validate(changed_lines: list[str], full_code: str) -> str:
         return _CACHE[cache_key]
 
     try:
-        result = chain.invoke({
-        "changed_code": changed_code,
-            "full_code": full_code
-        })
+        inputs = {"full_code": full_code, "changed_code": changed_code}
+        formatted_prompt = chain.prompt.format_prompt(**inputs).to_string()
+        print("🧠 Prompt to DB Agent:\n", formatted_prompt)
+        result = chain.invoke(inputs)
+
         text = result.get("text") or result.get("output") or "None"
-        _CACHE[cache_key] = text
-        with open(CACHE_PATH, "w") as f:
-            json.dump(_CACHE, f)
+        # _CACHE[cache_key] = text
+        # with open(CACHE_PATH, "w") as f:
+        #     json.dump(_CACHE, f)
         return text
     except Exception as e:
         return f"Error: {e}"

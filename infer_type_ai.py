@@ -76,9 +76,9 @@ def infer_type(func_body: str, context_code: str, full_code: str, max_batch_line
                 })
                 result_text = output.get("text") or output.get("output") or ""
                 result = json.loads(result_text.strip())
-                _CACHE[cache_key] = result
-                with open(CACHE_PATH, 'w') as f:
-                    json.dump(_CACHE, f)
+                # _CACHE[cache_key] = result
+                # with open(CACHE_PATH, 'w') as f:
+                #     json.dump(_CACHE, f)
             except Exception:
                 continue  # skip failed batches
 

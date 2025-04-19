@@ -28,10 +28,10 @@ Full File:
 
 Focus only on the changed lines.
 
-Check for:
+please consider these changes as risk
 - Parameters used without null/type checks
 - Direct access to array keys/fields without validation
-- Blindly trusting input data
+- Check when statically accessing any variable or function if that class name is correct and case sensitive
 
 Only return issues caused by these changes. Respond with "None" if no new risks.
 """)
@@ -52,9 +52,9 @@ def validate(changed_lines: list[str], full_code: str) -> str:
             "full_code": full_code
         })
         text = result.get("text") or result.get("output") or "None"
-        _CACHE[cache_key] = text
-        with open(CACHE_PATH, "w") as f:
-            json.dump(_CACHE, f)
+        # _CACHE[cache_key] = text
+        # with open(CACHE_PATH, "w") as f:
+        #     json.dump(_CACHE, f)
         return text
     except Exception as e:
         return f"Error: {e}"

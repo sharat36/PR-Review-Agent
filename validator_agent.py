@@ -72,9 +72,9 @@ Return only a comma-separated list of validators. No explanation.
                     "full_code": batch
                 })
                 raw = result.get("text") or result.get("output") or ""
-                _CACHE[cache_key] = raw
-                with open(CACHE_PATH, 'w') as f:
-                    json.dump(_CACHE, f)
+                # _CACHE[cache_key] = raw
+                # with open(CACHE_PATH, 'w') as f:
+                #     json.dump(_CACHE, f)
             except Exception:
                 continue
 
